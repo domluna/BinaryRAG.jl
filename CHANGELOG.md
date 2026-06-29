@@ -7,6 +7,7 @@ All notable changes to the [BinaryRAG.jl](file:///Users/lunaticd/code/BinaryRAG.
 ## [0.1.0] - 2026-06-28
 
 ### Added
+- **Specialized `hamming_distance` for `SVector{8, UInt64}`**: Added an inlined, type-stable method that uses static loop unrolling and `@inbounds` to guarantee hardware SIMD vectorization (AVX-512 / NEON) without AbstractArray dispatch overhead.
 - **Heuristic Neighbor Selection (Heuristic 2)**: Implemented Heuristic 2 neighbor selection from the HNSW paper. Considers the diversity of candidates to select neighbors that are close but in different directions. Improves **1M recall by 4.6%** (reaching **98.2%**) and **reduces query latency by 7%**.
 - **Parallel HNSW Construction**: Implemented a thread-safe parallel index builder (`construct`) using a **Task-Pool with Atomic Work-Stealing** pattern. Achieved a **4.25x speedup** on 4 threads.
 - **Striped Lock Pool & Flat Counts**: Replaced the individual lock per node with a striped lock pool of size 2,048, and replaced the `Atomic{Int}` counts with a flat `Vector{Int}` per level. Since reads and writes are protected by the locks, this is 100% thread-safe and reduced memory allocations during HNSW construction by **83.6%** (from 1.3M down to 215k).
