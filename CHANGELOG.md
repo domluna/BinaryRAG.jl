@@ -8,7 +8,8 @@ All notable changes to the [BinaryRAG.jl](file:///Users/lunaticd/code/BinaryRAG.
 
 ### Added
 - **Parallel HNSW Construction**: Implemented a thread-safe parallel index builder (`construct`) using a **Task-Pool with Atomic Work-Stealing** pattern. Achieved a **4.25x speedup** on 4 threads.
-- **Lock-Free Reader / Locked Writer Graph**: Redesigned the graph to use a pre-allocated `Matrix{Int}` of size `(mx, max_elements)` per level and a `Vector{Threads.Atomic{Int}}` for neighbor counts. Updates are protected by a lightweight `SpinLock` per node, while readers are **100% lock-free** and synchronized via memory fences (`Threads.atomic_fence()`).
+- **Striped Lock Pool & Flat Counts**: Replaced the individual lock per node with a striped lock pool of size 2,048, and replaced the `Atomic{Int}` counts with a flat `Vector{Int}` per level. Since reads and writes are protected by the locks, this is 100% thread-safe and reduced memory allocations during HNSW construction by **83.6%** (from 1.3M down to 215k).
+- **Lock-Free Reader / Locked Writer Graph**: Redesigned the graph to use a pre-allocated `Matrix{Int}` of size `(mx, max_elements)` per level. Updates are protected by the striped locks, while readers are **100% lock-free** and synchronized via memory fences (`Threads.atomic_fence()`).
 - **`SearchContext` Struct**: Encapsulates heaps (`MinHeap`, `MaxHeap`), the visited buffer, and a pre-allocated `neighbors_buf` to ensure 0 heap allocations during both search and parallel insertion.
 - **`search!` Function**: An in-place search API (`search!(result, hnsw, query, ctx)`) that achieves **100% allocation-free** queries (0 allocations, 0 bytes) by writing results directly to a pre-allocated buffer.
 - **`insertion_sort!` Helper**: Added a custom in-place sorting function for small heap arrays to avoid the overhead and view allocations of Julia's standard `sort!`.
@@ -49,11 +50,11 @@ Evaluating the trade-offs on the PubMed dataset (64-byte embeddings):
 | Metric | Exact Method (100k) | HNSW Method (100k) | Exact Method (36.5M - Full) | HNSW Method (36.5M - Full) |
 | :--- | :---: | :---: | :---: | :---: |
 | **Data Loading Time** | **1.5 ms** | 1.5 ms | **2.39 seconds** | 2.39 seconds |
-| **Index Build Time** | **0 seconds** | **1.46 seconds** *(4 threads)* | **0 seconds** | **~13 minutes** *(4 threads, est.)* |
+| **Index Build Time** | **0 seconds** | **1.38 seconds** *(4 threads)* | **0 seconds** | **~12 minutes** *(4 threads, est.)* |
 | **Query Latency ($k=10$)** | 386.0 $\mu$s | **21.9 $\mu$s** | ~140.0 ms *(est.)* | **< 100.0 $\mu$s** *(est.)* |
 | **RAM Usage (Est.)** | **6.4 MB** | ~22.4 MB | **2.33 GB** | ~8.50 GB |
 
-*Note: With our parallel construction, HNSW build time on 4 threads is **4.25x faster** (from 6.20s down to **1.46s**), projecting a full 36.5M dataset indexing time of only **13 minutes** (down from 55 minutes).*
+*Note: With our parallel construction, HNSW build time on 4 threads is **4.5x faster** (from 6.20s down to **1.38s**), projecting a full 36.5M dataset indexing time of only **12 minutes** (down from 55 minutes).*
 
 ### 3. Recall & Accuracy on Binary Spaces
 Evaluated on 10,000 vectors with $k=10$ and $efSearch=100$:
