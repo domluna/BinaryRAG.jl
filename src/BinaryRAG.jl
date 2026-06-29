@@ -11,5 +11,6 @@ export HNSW, MaxHeap, MinHeap, SearchContext, approx_vs_exact, construct,
 include("heap.jl")
 include("exact.jl")
 include("hnsw.jl")
+include("util.jl")
 
 end # module
