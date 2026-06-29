@@ -1,3 +1,17 @@
+@inline function prefetch(ptr::Ptr{Nothing})
+    Base.llvmcall(
+        ("""
+         declare void @llvm.prefetch(i8*, i32, i32, i32)
+         
+         define void @entry(i8* %ptr) {
+             call void @llvm.prefetch(i8* %ptr, i32 0, i32 3, i32 1)
+             ret void
+         }
+         """, "entry"),
+        Nothing, Tuple{Ptr{Nothing}}, ptr
+    )
+end
+
 mutable struct HNSW
     const connectivity::Int
     const connectivity0::Int
@@ -178,6 +192,11 @@ function _greedy_search(hnsw::HNSW, ctx::SearchContext, query::SVector{8,UInt64}
         
         for i in 1:c_neighbors_count
             @inbounds e = neighbors_buf[i]
+            prefetch(Ptr{Nothing}(pointer(hnsw.data, e)))
+        end
+        
+        for i in 1:c_neighbors_count
+            @inbounds e = neighbors_buf[i]
             d_e = hamming_distance(query, hnsw.data[e])
             if d_e < curr_d
                 curr = e
@@ -223,6 +242,13 @@ function _search_layer!(
             @inbounds neighbors_buf[i] = hnsw.graphs[level][i, c]
         end
         unlock(lk)
+        
+        for i in 1:c_neighbors_count
+            @inbounds e = neighbors_buf[i]
+            if visited_buf[e] != epoch
+                prefetch(Ptr{Nothing}(pointer(hnsw.data, e)))
+            end
+        end
         
         for i in 1:c_neighbors_count
             @inbounds e = neighbors_buf[i]
