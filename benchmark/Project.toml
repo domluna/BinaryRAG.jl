@@ -1,0 +1,7 @@
+[deps]
+BinaryRAG = "c6b8d2a1-e37a-4c28-984f-e8b23f1a6d7c"
+Chairmarks = "0ca39b1e-fe0b-4e98-acfc-b1656634c4de"
+StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[sources]
+BinaryRAG = {path = ".."}
