@@ -5,8 +5,9 @@ mutable struct HNSW
 
     # graphs[level] is a Matrix{Int} of size (mx, max_elements)
     const graphs::Vector{Matrix{Int}}
-    # counts[level] is a Vector{Threads.Atomic{Int}} of length max_elements
-    const counts::Vector{Vector{Threads.Atomic{Int}}}
+    # counts[level] is a Vector{Int} of length max_elements (no longer atomic!)
+    const counts::Vector{Vector{Int}}
+    # Striped lock pool to protect node updates without allocating a lock per node
     const locks::Vector{Threads.SpinLock}
     const entry_lock::ReentrantLock
 
@@ -21,10 +22,11 @@ mutable struct HNSW
         connectivity0::Int = connectivity * 2,
         mL::Float64 = 1 / log(connectivity),
         max_levels::Int = 10,
+        lock_pool_size::Int = 2048,
     )
         graphs = [zeros(Int, level == 1 ? connectivity0 : connectivity, max_elements) for level in 1:max_levels]
-        counts = [[Threads.Atomic{Int}(0) for _ in 1:max_elements] for level in 1:max_levels]
-        locks = [Threads.SpinLock() for _ in 1:max_elements]
+        counts = [zeros(Int, max_elements) for level in 1:max_levels]
+        locks = [Threads.SpinLock() for _ in 1:lock_pool_size]
         new(
             connectivity,
             connectivity0,
@@ -52,6 +54,11 @@ end
 
 function rand_level(hnsw::HNSW)::Int
     floor(Int, (-log(rand()) * hnsw.mL) + 1)
+end
+
+# Helper to get the lock index for a node in the striped lock pool
+@inline function get_lock(hnsw::HNSW, n::Int)
+    @inbounds return hnsw.locks[mod1(n, length(hnsw.locks))]
 end
 
 # SearchContext encapsulating heaps and visited buffer for 100% allocation-free queries
@@ -96,12 +103,13 @@ function _greedy_search(hnsw::HNSW, ctx::SearchContext, query::SVector{8,UInt64}
     while changed
         changed = false
         
-        lock(hnsw.locks[curr])
-        c_neighbors_count = hnsw.counts[level][curr][]
+        lk = get_lock(hnsw, curr)
+        lock(lk)
+        c_neighbors_count = hnsw.counts[level][curr]
         for i in 1:c_neighbors_count
             @inbounds neighbors_buf[i] = hnsw.graphs[level][i, curr]
         end
-        unlock(hnsw.locks[curr])
+        unlock(lk)
         
         for i in 1:c_neighbors_count
             @inbounds e = neighbors_buf[i]
@@ -143,12 +151,13 @@ function _search_layer!(
             break
         end
 
-        lock(hnsw.locks[c])
-        c_neighbors_count = hnsw.counts[level][c][]
+        lk = get_lock(hnsw, c)
+        lock(lk)
+        c_neighbors_count = hnsw.counts[level][c]
         for i in 1:c_neighbors_count
             @inbounds neighbors_buf[i] = hnsw.graphs[level][i, c]
         end
-        unlock(hnsw.locks[c])
+        unlock(lk)
         
         for i in 1:c_neighbors_count
             @inbounds e = neighbors_buf[i]
@@ -235,28 +244,30 @@ function Base.insert!(hnsw::HNSW, ctx::SearchContext, q::SVector{8,UInt64})
         neighbors = [ctx.W.data[i].second for i in 1:n_neighbors]
 
         # Write neighbors of ind under its own lock
-        lock(hnsw.locks[ind])
+        lk_ind = get_lock(hnsw, ind)
+        lock(lk_ind)
         try
             for i in 1:n_neighbors
                 @inbounds hnsw.graphs[level][i, ind] = neighbors[i]
             end
             Threads.atomic_fence()
-            hnsw.counts[level][ind][] = n_neighbors
+            hnsw.counts[level][ind] = n_neighbors
         finally
-            unlock(hnsw.locks[ind])
+            unlock(lk_ind)
         end
         
         # Add back-edges from neighbors to ind (each under their respective locks)
         for i in 1:n_neighbors
             @inbounds n = neighbors[i]
             
-            lock(hnsw.locks[n])
+            lk_n = get_lock(hnsw, n)
+            lock(lk_n)
             try
-                n_count = hnsw.counts[level][n][]
+                n_count = hnsw.counts[level][n]
                 if n_count < mx
                     @inbounds hnsw.graphs[level][n_count + 1, n] = ind
                     Threads.atomic_fence()
-                    hnsw.counts[level][n][] = n_count + 1
+                    hnsw.counts[level][n] = n_count + 1
                 else
                     # O(M) Max-Replacement
                     max_d = -1
@@ -276,7 +287,7 @@ function Base.insert!(hnsw::HNSW, ctx::SearchContext, q::SVector{8,UInt64})
                     end
                 end
             finally
-                unlock(hnsw.locks[n])
+                unlock(lk_n)
             end
         end
 
@@ -338,7 +349,7 @@ function construct(
     wait.(tasks)
     
     for lc = 1:length(hnsw.graphs)
-        cnt = count(i -> i == hnsw.enter_point[] || hnsw.counts[lc][i][] > 0, 1:hnsw.current_size[])
+        cnt = count(i -> i == hnsw.enter_point[] || hnsw.counts[lc][i] > 0, 1:hnsw.current_size[])
         if cnt > 0
             println("Layer $lc: length = $cnt")
         end
