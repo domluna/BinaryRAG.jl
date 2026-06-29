@@ -34,6 +34,15 @@ end
     s
 end
 
+@inline function hamming_distance(a::SVector{8,UInt64}, b::SVector{8,UInt64})::Int
+    s = 0
+    @inbounds for i = 1:8
+        s += count_ones(a[i] ⊻ b[i])
+    end
+    return s
+end
+
+
 function _k_closest!(
     heap::MaxHeap,
     db::AbstractVector{V},
