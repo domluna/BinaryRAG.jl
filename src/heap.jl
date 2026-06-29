@@ -70,6 +70,17 @@ function Base.insert!(heap::MaxHeap, value::Pair{Int,Int})
     end
 end
 
+function insert_limit!(heap::MaxHeap, value::Pair{Int,Int}, ef::Int)
+    if heap.current_idx <= ef
+        curr = heap.current_idx
+        heap.current_idx += 1
+        sift_up_max!(heap.data, value, curr)
+    elseif value.first < heap.data[1].first
+        sift_down_max!(heap.data, value, 1, ef)
+    end
+end
+
+
 
 # MinHeap Implementation
 mutable struct MinHeap

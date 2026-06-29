@@ -215,6 +215,7 @@ function _search_layer!(
     query::SVector{8,UInt64},
     ep::Int,
     level::Int,
+    ef::Int = ctx.W.k
 )
     candidates = ctx.candidates
     W = ctx.W
@@ -224,14 +225,14 @@ function _search_layer!(
     visited_buf[ep] = epoch
     d = hamming_distance(query, hnsw.data[ep])
     insert!(candidates, d => ep)
-    insert!(W, d => ep)
+    insert_limit!(W, d => ep, ef)
     
     neighbors_buf = ctx.neighbors_buf
 
     while length(candidates) > 0
         d_c, c = pop!(candidates)
 
-        if length(W) >= W.k && d_c > W.data[1].first
+        if length(W) >= ef && d_c > W.data[1].first
             break
         end
 
@@ -258,8 +259,8 @@ function _search_layer!(
             visited_buf[e] = epoch
 
             d_e = hamming_distance(query, hnsw.data[e])
-            if length(W) < W.k || d_e < W.data[1].first
-                insert!(W, d_e => e)
+            if length(W) < ef || d_e < W.data[1].first
+                insert_limit!(W, d_e => e, ef)
                 insert!(candidates, d_e => e)
             end
         end
@@ -322,8 +323,9 @@ function Base.insert!(hnsw::HNSW, ctx::SearchContext, q::SVector{8,UInt64})
     # 2. Local search on layers l down to 1
     for level = l:-1:1
         mx = level == 1 ? hnsw.connectivity0 : hnsw.connectivity
+        ef = level == 1 ? ctx.W.k : hnsw.connectivity
         
-        _search_layer!(hnsw, ctx, q, ep, level)
+        _search_layer!(hnsw, ctx, q, ep, level, ef)
         
         len_W = length(ctx.W)
         insertion_sort!(ctx.W.data, len_W)
