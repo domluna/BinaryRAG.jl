@@ -4,7 +4,7 @@ All notable changes to the [BinaryRAG.jl](file:///Users/lunaticd/code/BinaryRAG.
 
 ---
 
-## [0.2.0] - 2026-06-28
+## [0.1.0] - 2026-06-28
 
 ### Added
 - **`SearchContext` Struct**: Encapsulates heaps (`MinHeap`, `MaxHeap`) and the visited buffer. Allows pre-allocating state once and reusing it across queries.
