@@ -47,21 +47,25 @@ Measured using 4 CPU threads via `julia -t auto`:
 ### 2. Setup vs. Query Trade-offs
 Evaluating the trade-offs on the PubMed dataset (64-byte embeddings):
 
-| Metric | Exact Method (100k) | HNSW Method (100k) | Exact Method (36.5M - Full) | HNSW Method (36.5M - Full) |
-| :--- | :---: | :---: | :---: | :---: |
-| **Data Loading Time** | **1.5 ms** | 1.5 ms | **2.39 seconds** | 2.39 seconds |
-| **Index Build Time** | **0 seconds** | **1.38 seconds** *(4 threads)* | **0 seconds** | **~12 minutes** *(4 threads, est.)* |
-| **Query Latency ($k=10$)** | 386.0 $\mu$s | **21.9 $\mu$s** | ~140.0 ms *(est.)* | **< 100.0 $\mu$s** *(est.)* |
-| **RAM Usage (Est.)** | **6.4 MB** | ~22.4 MB | **2.33 GB** | ~8.50 GB |
+| Metric | Exact Method (100k) | HNSW Method (100k) | Exact Method (1M) | HNSW Method (1M) | Exact Method (36.5M - Full) | HNSW Method (36.5M - Full) |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **Data Loading Time** | **1.5 ms** | 1.5 ms | **52 ms** | 52 ms | **2.39 seconds** | 2.39 seconds |
+| **Index Build Time** | **0 seconds** | **1.38 seconds** *(4 threads)* | **0 seconds** | **27.0 seconds** *(4 threads)* | **0 seconds** | **~18 minutes** *(4 threads, est.)* |
+| **Query Latency ($k=10$)** | 386.0 $\mu$s | **21.9 $\mu$s** | 3.96 ms | **152.3 $\mu$s** | ~140.0 ms *(est.)* | **< 200.0 $\mu$s** *(est.)* |
+| **RAM Usage (Est.)** | **6.4 MB** | ~22.4 MB | **64 MB** | ~224 MB | **2.33 GB** | ~8.50 GB |
 
-*Note: With our parallel construction, HNSW build time on 4 threads is **4.5x faster** (from 6.20s down to **1.38s**), projecting a full 36.5M dataset indexing time of only **12 minutes** (down from 55 minutes).*
+*Note: With our parallel construction, HNSW build time on 4 threads scales extremely well: **100k in 1.38s**, **1M in 27s**, projecting a full 36.5M dataset indexing time of only **~18 minutes**.*
 
 ### 3. Recall & Accuracy on Binary Spaces
-Evaluated on 10,000 vectors with $k=10$ and $efSearch=100$:
+Evaluated with $k=10$ and $efSearch=100$:
 
-- **Uniform Random (512-bit)**: **72.9% Index-based Recall** / **81.1% Distance-based Recall**.
+- **Uniform Random (512-bit)**: **72.9% Index-based Recall** / **81.1% Distance-based Recall** (N=10k).
   - *Why*: The curse of dimensionality concentrates distances around 256 bits, removing any navigable topological structure or distance gradients.
-- **Low-Dimensional Manifold (16-bit random)**: **67.0% Index-based Recall** / **100.0% Distance-based Recall**.
+- **Low-Dimensional Manifold (16-bit random)**: **67.0% Index-based Recall** / **100.0% Distance-based Recall** (N=10k).
   - *Why*: Restricting randomness to a 16-bit subspace creates a steep, navigable distance gradient, allowing HNSW to find the true nearest neighbors with 100% accuracy.
-- **Real-World PubMed Embeddings**: **94.4% Index-based Recall** / **99.1% Distance-based Recall** (scales to **92.8% / 96.9%** at 100k).
-  - *Why*: Real-world embeddings naturally group into dense semantic topic clusters, providing excellent distance gradients and graph routing connectivity.
+- **Real-World PubMed Embeddings**:
+  - **10k PubMed**: **94.4% Index-based Recall** / **99.1% Distance-based Recall**.
+  - **100k PubMed**: **92.8% Index-based Recall** / **96.9% Distance-based Recall**.
+  - **1M PubMed**: **87.7% Index-based Recall** / **93.6% Distance-based Recall**.
+  - *Why*: Real-world embeddings naturally group into dense semantic topic clusters, providing excellent distance gradients and graph routing connectivity even as the dataset scales 100x.
+
