@@ -131,12 +131,13 @@ function Base.insert!(hnsw::HNSW, ctx::SearchContext, q::SVector{8,UInt64})
     old_L = length(hnsw.graphs)
     # Ensure hnsw.graphs has at least l levels
     while length(hnsw.graphs) < l
-        push!(hnsw.graphs, [Int[] for _ in 1:ind])
+        push!(hnsw.graphs, [sizehint!(Int[], hnsw.connectivity) for _ in 1:ind])
     end
 
     # Ensure each existing level has length ind
     for level = 1:old_L
-        push!(hnsw.graphs[level], Int[])
+        mx = level == 1 ? hnsw.connectivity0 : hnsw.connectivity
+        push!(hnsw.graphs[level], sizehint!(Int[], mx))
     end
 
     if ind == 1
@@ -184,10 +185,24 @@ function Base.insert!(hnsw::HNSW, ctx::SearchContext, q::SVector{8,UInt64})
         for n in neighbors
             n_neighbors_list = hnsw.graphs[level][n]
             if ind ∉ n_neighbors_list
-                push!(n_neighbors_list, ind)
-                if length(n_neighbors_list) > mx
-                    sort!(n_neighbors_list, by = x -> hamming_distance(hnsw.data[x], hnsw.data[n]))
-                    resize!(n_neighbors_list, mx)
+                if length(n_neighbors_list) < mx
+                    push!(n_neighbors_list, ind)
+                else
+                    # O(M) Max-Replacement: Find the neighbor with the maximum distance to n
+                    max_d = -1
+                    max_idx = -1
+                    d_new = hamming_distance(hnsw.data[ind], hnsw.data[n])
+                    for i in 1:length(n_neighbors_list)
+                        @inbounds x = n_neighbors_list[i]
+                        d_x = hamming_distance(hnsw.data[x], hnsw.data[n])
+                        if d_x > max_d
+                            max_d = d_x
+                            max_idx = i
+                        end
+                    end
+                    if d_new < max_d
+                        @inbounds n_neighbors_list[max_idx] = ind
+                    end
                 end
             end
         end
