@@ -25,7 +25,7 @@ mutable struct HNSW
         lock_pool_size::Int = 2048,
     )
         graphs = [zeros(Int, level == 1 ? connectivity0 : connectivity, max_elements) for level in 1:max_levels]
-        counts = [zeros(Int, max_elements) for level in 1:max_levels]
+        counts = [zeros(Int, max_elements) for _ in 1:max_levels]
         locks = [Threads.SpinLock() for _ in 1:lock_pool_size]
         new(
             connectivity,
@@ -68,6 +68,8 @@ mutable struct SearchContext
     visited::Vector{Int}
     epoch::Int
     const neighbors_buf::Vector{Int}
+    const selected_neighbors::Vector{Int}
+    const prune_candidates::Vector{Pair{Int,Int}}
 
     function SearchContext(hnsw::HNSW, expansion_search::Int = 30, maximum_candidates::Int = 1000)
         new(
@@ -75,7 +77,9 @@ mutable struct SearchContext
             MaxHeap(expansion_search),
             zeros(Int, length(hnsw.data)),
             1,
-            Vector{Int}(undef, hnsw.connectivity0)
+            Vector{Int}(undef, hnsw.connectivity0),
+            Vector{Int}(undef, hnsw.connectivity0),
+            Vector{Pair{Int,Int}}(undef, hnsw.connectivity0 + 1)
         )
     end
 end
@@ -91,6 +95,67 @@ end
         end
         @inbounds data[j+1] = val
     end
+end
+
+# Heuristic 2 Neighbor Selection (0 heap allocations)
+# Selects neighbors that are close to q, but also diverse (far from each other)
+function select_neighbors_heuristic!(
+    selected::Vector{Int},
+    hnsw::HNSW,
+    candidates::Vector{Pair{Int,Int}}, # Sorted by distance to q in ascending order
+    len_W::Int,
+    M::Int
+)::Int
+    n_sel = 0
+    for i in 1:len_W
+        if n_sel >= M
+            break
+        end
+        @inbounds pair = candidates[i]
+        e = pair.second
+        d_eq = pair.first
+        
+        # Check if e is closer to q than to any node already selected
+        keep = true
+        for j in 1:n_sel
+            @inbounds r = selected[j]
+            d_er = hamming_distance(hnsw.data[e], hnsw.data[r])
+            if d_er < d_eq
+                keep = false
+                break
+            end
+        end
+        
+        if keep
+            n_sel += 1
+            @inbounds selected[n_sel] = e
+        end
+    end
+    
+    # Keep pruned connections: if not enough neighbors selected, fill with the remaining closest ones
+    if n_sel < M
+        for i in 1:len_W
+            if n_sel >= M
+                break
+            end
+            @inbounds pair = candidates[i]
+            e = pair.second
+            
+            already_selected = false
+            for j in 1:n_sel
+                @inbounds if selected[j] == e
+                    already_selected = true
+                    break
+                end
+            end
+            
+            if !already_selected
+                n_sel += 1
+                @inbounds selected[n_sel] = e
+            end
+        end
+    end
+    return n_sel
 end
 
 # Fast greedy search for upper layers of the HNSW graph (0 allocations, thread-safe)
@@ -237,11 +302,17 @@ function Base.insert!(hnsw::HNSW, ctx::SearchContext, q::SVector{8,UInt64})
         len_W = length(ctx.W)
         insertion_sort!(ctx.W.data, len_W)
         
-        n_neighbors = min(level == 1 ? hnsw.connectivity0 : hnsw.connectivity, len_W)
+        # Select neighbors using Heuristic 2
+        n_neighbors = select_neighbors_heuristic!(
+            ctx.selected_neighbors,
+            hnsw,
+            ctx.W.data,
+            len_W,
+            mx
+        )
         
-        # Add bidirectional edges
-        # First, copy neighbors to a local array to avoid holding locks or reading heaps concurrently
-        neighbors = [ctx.W.data[i].second for i in 1:n_neighbors]
+        # Copy selected neighbors
+        neighbors = [ctx.selected_neighbors[i] for i in 1:n_neighbors]
 
         # Write neighbors of ind under its own lock
         lk_ind = get_lock(hnsw, ind)
@@ -269,22 +340,32 @@ function Base.insert!(hnsw::HNSW, ctx::SearchContext, q::SVector{8,UInt64})
                     Threads.atomic_fence()
                     hnsw.counts[level][n] = n_count + 1
                 else
-                    # O(M) Max-Replacement
-                    max_d = -1
-                    max_idx = -1
-                    d_new = hamming_distance(hnsw.data[ind], hnsw.data[n])
-                    for j in 1:mx
+                    # Prune n's neighbor list using Heuristic 2
+                    # Candidates are n's existing neighbors plus the new node ind
+                    prune_len = n_count + 1
+                    for j in 1:n_count
                         @inbounds x = hnsw.graphs[level][j, n]
-                        d_x = hamming_distance(hnsw.data[x], hnsw.data[n])
-                        if d_x > max_d
-                            max_d = d_x
-                            max_idx = j
-                        end
+                        @inbounds ctx.prune_candidates[j] = hamming_distance(hnsw.data[x], hnsw.data[n]) => x
                     end
-                    if d_new < max_d
-                        @inbounds hnsw.graphs[level][max_idx, n] = ind
-                        Threads.atomic_fence()
+                    @inbounds ctx.prune_candidates[prune_len] = hamming_distance(hnsw.data[ind], hnsw.data[n]) => ind
+                    
+                    insertion_sort!(ctx.prune_candidates, prune_len)
+                    
+                    # Select mx diverse neighbors
+                    n_pruned = select_neighbors_heuristic!(
+                        ctx.selected_neighbors,
+                        hnsw,
+                        ctx.prune_candidates,
+                        prune_len,
+                        mx
+                    )
+                    
+                    # Overwrite n's neighbor list in-place
+                    for j in 1:n_pruned
+                        @inbounds hnsw.graphs[level][j, n] = ctx.selected_neighbors[j]
                     end
+                    Threads.atomic_fence()
+                    hnsw.counts[level][n] = n_pruned
                 end
             finally
                 unlock(lk_n)
