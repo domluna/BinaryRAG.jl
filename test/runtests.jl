@@ -84,6 +84,21 @@ end
         results = search(hnsw, q, 5; expansion_search=30)
         @test length(results) <= 5
         @test all(1 <= idx <= 500 for idx in results)
+
+        # 1. Verify in-place search! matches standard search
+        ctx = SearchContext(hnsw, 30, 1000)
+        res_buf = Vector{Int}(undef, 5)
+        n_found = search!(res_buf, hnsw, q, ctx)
+        @test n_found == length(results)
+        @test res_buf[1:n_found] == results
+
+        # 2. Verify HNSW distance accuracy (k=1)
+        exact_results = k_closest(hnsw.data, q, 1)
+        true_min_dist = exact_results[1].first
+
+        hnsw_closest = search(hnsw, q, 1; expansion_search=100)
+        hnsw_min_dist = hamming_distance(q, hnsw.data[hnsw_closest[1]])
+        @test hnsw_min_dist == true_min_dist
     end
 
     @testset "Edge Cases" begin
