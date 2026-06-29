@@ -38,8 +38,25 @@ mutable struct HNSW
         max_levels::Int = 10,
         lock_pool_size::Int = 2048,
     )
-        graphs = [zeros(Int, level == 1 ? connectivity0 : connectivity, max_elements) for level in 1:max_levels]
-        counts = [zeros(Int, max_elements) for _ in 1:max_levels]
+        graphs = Vector{Matrix{Int}}(undef, max_levels)
+        counts = Vector{Vector{Int}}(undef, max_levels)
+        for level in 1:max_levels
+            # Pre-allocate Level 1 to 100% capacity.
+            # Pre-allocate upper levels with a massive safety margin relative to their expected occupancy.
+            cap = if level == 1
+                max_elements
+            elseif level == 2
+                max(1000, floor(Int, max_elements / 4))
+            elseif level == 3
+                max(500, floor(Int, max_elements / 16))
+            elseif level == 4
+                max(200, floor(Int, max_elements / 64))
+            else
+                max(100, floor(Int, max_elements / 256))
+            end
+            graphs[level] = zeros(Int, level == 1 ? connectivity0 : connectivity, cap)
+            counts[level] = zeros(Int, cap)
+        end
         locks = [Threads.SpinLock() for _ in 1:lock_pool_size]
         new(
             connectivity,
@@ -285,8 +302,11 @@ function Base.insert!(hnsw::HNSW, ctx::SearchContext, q::SVector{8,UInt64})
     hnsw.data[ind] = q
     
     l = rand_level(hnsw)
-    # Limit l to max_levels
     l = min(l, length(hnsw.graphs))
+    # Cap l to the highest level where we have capacity for this node index
+    while l > 1 && ind > size(hnsw.graphs[l], 2)
+        l -= 1
+    end
     
     if ind == 1
         # Set enter point atomically
@@ -295,7 +315,7 @@ function Base.insert!(hnsw::HNSW, ctx::SearchContext, q::SVector{8,UInt64})
         return
     end
 
-    L = length(hnsw.graphs)
+    L = hnsw.enter_point_level[]
     ep = hnsw.enter_point[]
     
     # 1. Greedy search on upper layers down to l+1
@@ -458,7 +478,7 @@ function construct(
     wait.(tasks)
     
     for lc = 1:length(hnsw.graphs)
-        cnt = count(i -> i == hnsw.enter_point[] || hnsw.counts[lc][i] > 0, 1:hnsw.current_size[])
+        cnt = count(i -> i == hnsw.enter_point[] || (i <= length(hnsw.counts[lc]) && hnsw.counts[lc][i] > 0), 1:hnsw.current_size[])
         if cnt > 0
             println("Layer $lc: length = $cnt")
         end
@@ -505,7 +525,7 @@ function search!(
         ctx.epoch = 1
     end
 
-    L = length(hnsw.graphs)
+    L = hnsw.enter_point_level[]
     ep = hnsw.enter_point[]
     for level = L:-1:2
         ep = _greedy_search(hnsw, ctx, query, ep, level)
