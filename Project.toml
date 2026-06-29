@@ -1,10 +1,12 @@
 name = "BinaryRAG"
 uuid = "c6b8d2a1-e37a-4c28-984f-e8b23f1a6d7c"
-authors = ["domluna"]
 version = "0.1.0"
+authors = ["domluna"]
 
 [deps]
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
+
+[compat]
 
 [extras]
 Test = "8dfed614-4b80-516e-9520-2c2616a1b24d"

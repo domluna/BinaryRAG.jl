@@ -77,7 +77,7 @@ end
         # Construct HNSW graph with 500 nodes
         hnsw = construct(500; connectivity=16)
         @test length(hnsw.data) == 500
-        @test haskey(hnsw.graphs, 1)
+        @test length(hnsw.graphs) >= 1
 
         # Search for closest node
         q = SVector{8, UInt64}(reinterpret(UInt64, rand(Int8, 64)))

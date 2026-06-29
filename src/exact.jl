@@ -28,7 +28,7 @@ end
     x2::AbstractArray{T},
 )::Int where {T<:Integer}
     s = 0
-    @inbounds @simd for i in eachindex(x1, x2)
+    @inbounds for i in eachindex(x1)
         s += hamming_distance(x1[i], x2[i])
     end
     s

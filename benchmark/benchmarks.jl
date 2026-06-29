@@ -32,4 +32,11 @@ hnsw = construct(10_000; connectivity=16)
 q_hnsw = SVector{8, UInt64}(reinterpret(UInt64, rand(Int8, 64)))
 println("\n--- Benchmarking HNSW Search (10k rows, k=10) ---")
 bench_hnsw = @b search($hnsw, $q_hnsw, 10; expansion_search=30)
-println("HNSW Search: ", bench_hnsw)
+println("HNSW Search (Standard): ", bench_hnsw)
+
+# 4. Benchmark HNSW In-Place Search
+println("\n--- Benchmarking In-Place HNSW Search (k=10) ---")
+ctx = SearchContext(hnsw, 30, 1000)
+result_buf = Vector{Int}(undef, 10)
+bench_hnsw_inplace = @b search!($result_buf, $hnsw, $q_hnsw, $ctx)
+println("HNSW Search (In-Place 0 allocs): ", bench_hnsw_inplace)

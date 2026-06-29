@@ -1,16 +1,16 @@
 # MaxHeap Implementation
 mutable struct MaxHeap
     const data::Vector{Pair{Int,Int}}
-    current_idx::Int # add pairs until current_idx > length(data)
+    current_idx::Int
     const k::Int
 
     function MaxHeap(k::Int)
-        new(fill((typemax(Int) => -1), k), 1, k)
+        new(fill(typemax(Int) => -1, k), 1, k)
     end
 end
 
 function Base.length(h::MaxHeap)
-    return min(h.k, h.current_idx - 1)
+    return h.current_idx - 1
 end
 
 function Base.getindex(h::MaxHeap, inds...)
@@ -21,68 +21,68 @@ function reset!(heap::MaxHeap)
     heap.current_idx = 1
 end
 
-function Base.insert!(heap::MaxHeap, value::Pair{Int,Int})
-    if heap.current_idx <= heap.k
-        heap.data[heap.current_idx] = value
-        heap.current_idx += 1
-        makeheap!(heap, heap.current_idx - 1)
-    elseif value.first < heap.data[1].first
-        heap.data[1] = value
-        heapify!(heap, 1)
+function sift_up_max!(data::Vector{Pair{Int,Int}}, val::Pair{Int,Int}, curr::Int)
+    @inbounds while curr > 1
+        parent = div(curr, 2)
+        if val.first > data[parent].first
+            data[curr] = data[parent]
+            curr = parent
+        else
+            break
+        end
     end
+    @inbounds data[curr] = val
 end
 
-function makeheap!(heap::MaxHeap, i::Int)
-    for j = div(i, 2):-1:1
-        heapify!(heap, j)
-    end
-end
-
-function makeheap!(heap::MaxHeap)
-    for i = div(heap.k, 2):-1:1
-        heapify!(heap, i)
-    end
-end
-
-function heapify!(heap::MaxHeap, i::Int)
-    n = length(heap.data)
-    curr = i
-    while true
+function sift_down_max!(data::Vector{Pair{Int,Int}}, val::Pair{Int,Int}, curr::Int, len::Int)
+    @inbounds while true
         left = 2 * curr
         right = 2 * curr + 1
         largest = curr
 
-        if left <= n && heap.data[left].first > heap.data[largest].first
+        if left <= len && data[left].first > val.first
             largest = left
         end
-
-        if right <= n && heap.data[right].first > heap.data[largest].first
-            largest = right
+        if right <= len
+            val_to_compare = largest == left ? data[left].first : val.first
+            if data[right].first > val_to_compare
+                largest = right
+            end
         end
 
         if largest != curr
-            heap.data[curr], heap.data[largest] = heap.data[largest], heap.data[curr]
+            data[curr] = data[largest]
             curr = largest
         else
             break
         end
+    end
+    @inbounds data[curr] = val
+end
+
+function Base.insert!(heap::MaxHeap, value::Pair{Int,Int})
+    if heap.current_idx <= heap.k
+        curr = heap.current_idx
+        heap.current_idx += 1
+        sift_up_max!(heap.data, value, curr)
+    elseif value.first < heap.data[1].first
+        sift_down_max!(heap.data, value, 1, heap.k)
     end
 end
 
 
 # MinHeap Implementation
 mutable struct MinHeap
-    const data::Vector{Pair{Int,Int}}
-    current_idx::Int # add pairs until current_idx > length(data)
-    const k::Int
+    data::Vector{Pair{Int,Int}}
+    current_idx::Int
 
     function MinHeap(k::Int)
-        new(fill((typemax(Int) => -1), k), 1, k)
+        new(fill(typemax(Int) => -1, k), 1)
     end
 end
 
 function Base.length(h::MinHeap)
-    return min(h.k, h.current_idx - 1)
+    return h.current_idx - 1
 end
 
 function Base.getindex(h::MinHeap, inds...)
@@ -93,93 +93,76 @@ function reset!(heap::MinHeap)
     heap.current_idx = 1
 end
 
-function Base.insert!(heap::MinHeap, value::Pair{Int,Int})
-    if heap.current_idx <= heap.k
-        heap.data[heap.current_idx] = value
-        heap.current_idx += 1
-        makeheap!(heap, heap.current_idx - 1)
-    else
-        ind = findmax(heap)
-        if heap[ind].first < value.first
-            return
+function sift_up_min!(data::Vector{Pair{Int,Int}}, val::Pair{Int,Int}, curr::Int)
+    @inbounds while curr > 1
+        parent = div(curr, 2)
+        if val.first < data[parent].first
+            data[curr] = data[parent]
+            curr = parent
+        else
+            break
         end
-        heap.data[1], heap.data[ind] = heap.data[ind], heap.data[1]
-        pop!(heap)
-        insert!(heap, value)
     end
+    @inbounds data[curr] = val
 end
 
-function makeheap!(heap::MinHeap, i::Int)
-    for j = div(i, 2):-1:1
-        heapify!(heap, j)
-    end
-end
-
-function heapify!(heap::MinHeap, i::Int)
-    n = length(heap)
-    curr = i
-    while true
+function sift_down_min!(data::Vector{Pair{Int,Int}}, val::Pair{Int,Int}, curr::Int, len::Int)
+    @inbounds while true
         left = 2 * curr
         right = 2 * curr + 1
         smallest = curr
 
-        if left <= n && heap.data[left].first < heap.data[smallest].first
+        if left <= len && data[left].first < val.first
             smallest = left
         end
-        if right <= n && heap.data[right].first < heap.data[smallest].first
-            smallest = right
+        if right <= len
+            val_to_compare = smallest == left ? data[left].first : val.first
+            if data[right].first < val_to_compare
+                smallest = right
+            end
         end
 
         if smallest != curr
-            heap.data[curr], heap.data[smallest] = heap.data[smallest], heap.data[curr]
+            data[curr] = data[smallest]
             curr = smallest
         else
             break
         end
     end
+    @inbounds data[curr] = val
+end
+
+function Base.insert!(heap::MinHeap, value::Pair{Int,Int})
+    n = length(heap.data)
+    if heap.current_idx > n
+        old_n = n
+        resize!(heap.data, max(16, n * 2))
+        @inbounds for i in old_n+1:length(heap.data)
+            heap.data[i] = typemax(Int) => -1
+        end
+    end
+    curr = heap.current_idx
+    heap.current_idx += 1
+    sift_up_min!(heap.data, value, curr)
 end
 
 function Base.pop!(heap::MinHeap)::Pair{Int,Int}
-    if heap.current_idx <= 1
+    len = length(heap)
+    if len == 0
         throw(ArgumentError("min-heap is empty"))
     end
-
-    min_value = heap.data[1]
-
-    heap.data[1], heap.data[heap.current_idx-1] =
-        heap.data[heap.current_idx-1], heap.data[1]
+    @inbounds min_value = heap.data[1]
+    if len > 1
+        @inbounds last_value = heap.data[len]
+        sift_down_min!(heap.data, last_value, 1, len - 1)
+    end
     heap.current_idx -= 1
-
-    heapify!(heap, 1)
-
     return min_value
 end
 
 function Base.iterate(heap::MinHeap, state=1)
-    nodes = heap.data::Vector{Pair{Int,Int}}
     if state > length(heap)
         return nothing
     end
-    return nodes[state], state + 1
-end
-
-function findmax(heap::MinHeap)::Int
-    if length(heap) == 0
-        throw(ArgumentError("min-heap is empty"))
-    end
-    if length(heap) == 1
-        return 1
-    end
-
-    n = length(heap)
-    ind = div(n, 2)
-    maxel = heap[ind]
-
-    for i in ind+1:n
-        if heap[i].first > maxel.first
-            maxel = heap[i]
-            ind = i
-        end
-    end
-    return ind
+    return heap.data[state], state + 1
 end

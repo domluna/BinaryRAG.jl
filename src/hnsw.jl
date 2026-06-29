@@ -3,7 +3,7 @@ mutable struct HNSW
     const connectivity0::Int
     const mL::Float64
 
-    const graphs::Dict{Int,Dict{Int,Vector{Int}}}
+    const graphs::Vector{Vector{Vector{Int}}}
 
     enter_point::Int
     data::Vector{SVector{8,UInt64}}
@@ -13,8 +13,7 @@ mutable struct HNSW
         connectivity0::Int = connectivity * 2,
         mL::Float64 = 1 / log(connectivity),
     )
-        v = Vector{SVector{8,UInt64}}[]
-        new(connectivity, connectivity0, mL, Dict{Int,Dict{Int,Vector{Int}}}(), 1, v)
+        new(connectivity, connectivity0, mL, Vector{Vector{Int}}[], 1, SVector{8,UInt64}[])
     end
 end
 
@@ -22,28 +21,70 @@ function rand_level(hnsw::HNSW)::Int
     floor(Int, (-log(rand()) * hnsw.mL) + 1)
 end
 
-function _search_layer(
-    hnsw::HNSW,
-    query::SVector{8,UInt64},
-    ep::Int,
-    expansion_factor::Int,
-    maximum_candidates::Int,
-    level::Int;
-)::Vector{Int}
-    candidates = MinHeap(maximum_candidates)
-    W = MaxHeap(expansion_factor)
-    return _search_layer(hnsw, candidates, W, query, ep, level)
+# SearchContext encapsulating heaps and visited buffer for 100% allocation-free queries
+mutable struct SearchContext
+    const candidates::MinHeap
+    const W::MaxHeap
+    visited::Vector{Int}
+    epoch::Int
+
+    function SearchContext(hnsw::HNSW, expansion_search::Int = 30, maximum_candidates::Int = 1000)
+        new(
+            MinHeap(maximum_candidates),
+            MaxHeap(expansion_search),
+            zeros(Int, length(hnsw.data)),
+            1
+        )
+    end
 end
 
-function _search_layer(
+# In-place insertion sort for small vectors (0 allocations, extremely fast for size <= 100)
+function insertion_sort!(data::Vector{Pair{Int,Int}}, len::Int)
+    for i = 2:len
+        @inbounds val = data[i]
+        j = i - 1
+        @inbounds while j >= 1 && data[j].first > val.first
+            data[j+1] = data[j]
+            j -= 1
+        end
+        @inbounds data[j+1] = val
+    end
+end
+
+# Fast greedy search for upper layers of the HNSW graph (0 allocations)
+function _greedy_search(hnsw::HNSW, query::SVector{8,UInt64}, ep::Int, level::Int)::Int
+    curr = ep
+    curr_d = hamming_distance(query, hnsw.data[curr])
+    changed = true
+    while changed
+        changed = false
+        neighbors = hnsw.graphs[level][curr]
+        for e in neighbors
+            d_e = hamming_distance(query, hnsw.data[e])
+            if d_e < curr_d
+                curr = e
+                curr_d = d_e
+                changed = true
+            end
+        end
+    end
+    return curr
+end
+
+# In-place search layer using SearchContext (0 allocations)
+function _search_layer!(
     hnsw::HNSW,
-    candidates::MinHeap,
-    W::MaxHeap,
+    ctx::SearchContext,
     query::SVector{8,UInt64},
     ep::Int,
-    level::Int;
-)::Vector{Int}
-    visited = Set{Int}([ep])
+    level::Int,
+)
+    candidates = ctx.candidates
+    W = ctx.W
+    visited_buf = ctx.visited
+    epoch = ctx.epoch
+    
+    visited_buf[ep] = epoch
     d = hamming_distance(query, hnsw.data[ep])
     insert!(candidates, d => ep)
     insert!(W, d => ep)
@@ -51,28 +92,24 @@ function _search_layer(
     while length(candidates) > 0
         d_c, c = pop!(candidates)
 
-        if d_c > W[1].first
+        if length(W) >= W.k && d_c > W.data[1].first
             break
         end
-        if !haskey(hnsw.graphs[level], c)
-            continue
-        end
 
-        for e in hnsw.graphs[level][c]
-            if in(e, visited)
+        neighbors = hnsw.graphs[level][c]
+        for e in neighbors
+            if visited_buf[e] == epoch
                 continue
             end
-            push!(visited, e)
+            visited_buf[e] = epoch
 
             d_e = hamming_distance(query, hnsw.data[e])
-            if d_e < W[1].first || length(W) < W.k
+            if length(W) < W.k || d_e < W.data[1].first
                 insert!(W, d_e => e)
                 insert!(candidates, d_e => e)
             end
         end
     end
-    sort!(W.data, by = x -> x[1])
-    return Int[W.data[i][2] for i = 1:length(W)]
 end
 
 function Base.insert!(
@@ -81,66 +118,85 @@ function Base.insert!(
     expansion_factor::Int = 100,
     maximum_candidates::Int = 1000,
 )
-    candidates = MinHeap(maximum_candidates)
-    W = MaxHeap(expansion_factor)
-    insert!(hnsw, candidates, W, q)
+    ctx = SearchContext(hnsw, expansion_factor, maximum_candidates)
+    insert!(hnsw, ctx, q)
 end
 
-function Base.insert!(hnsw::HNSW, candidates::MinHeap, W::MaxHeap, q::SVector{8,UInt64})
+function Base.insert!(hnsw::HNSW, ctx::SearchContext, q::SVector{8,UInt64})
     push!(hnsw.data, q)
     ind = length(hnsw.data)
     l = rand_level(hnsw)
     new_entry_point = l > length(hnsw.graphs)
 
-    if !haskey(hnsw.graphs, l)
-        hnsw.graphs[l] = Dict{Int,Vector{Int}}()
-        for level = l-1:-1:1
-            if !haskey(hnsw.graphs, level)
-                hnsw.graphs[level] = Dict{Int,Vector{Int}}()
-            end
-        end
+    old_L = length(hnsw.graphs)
+    # Ensure hnsw.graphs has at least l levels
+    while length(hnsw.graphs) < l
+        push!(hnsw.graphs, [Int[] for _ in 1:ind])
     end
+
+    # Ensure each existing level has length ind
+    for level = 1:old_L
+        push!(hnsw.graphs[level], Int[])
+    end
+
     if ind == 1
-        for level = l:-1:1
-            hnsw.graphs[level][ind] = Int[]
-        end
         return
     end
 
     L = length(hnsw.graphs)
     ep = hnsw.enter_point
-    W0 = MaxHeap(1)
+    
+    # 1. Greedy search on upper layers down to l+1
     for level = L:-1:l+1
-        ep = _search_layer(hnsw, candidates, W0, q, ep, level)[1]
-        reset!(candidates)
-        reset!(W0)
+        ep = _greedy_search(hnsw, q, ep, level)
     end
 
+    # Reset heaps and epoch before starting local search
+    reset!(ctx.candidates)
+    reset!(ctx.W)
+    if ctx.epoch == typemax(Int)
+        fill!(ctx.visited, 0)
+        ctx.epoch = 1
+    else
+        ctx.epoch += 1
+    end
+
+    # Ensure visited buffer is large enough (in case graph grew)
+    if length(ctx.visited) < ind
+        resize!(ctx.visited, max(ind, length(ctx.visited) * 2))
+        fill!(ctx.visited, 0)
+        ctx.epoch = 1
+    end
+
+    # 2. Local search on layers l down to 1
     for level = l:-1:1
         mx = level == 1 ? hnsw.connectivity0 : hnsw.connectivity
-        neighbors = _search_layer(hnsw, candidates, W, q, ep, level)
-        neighbors = neighbors[1:min(hnsw.connectivity, length(neighbors))]
+        
+        _search_layer!(hnsw, ctx, q, ep, level)
+        
+        len_W = length(ctx.W)
+        insertion_sort!(ctx.W.data, len_W)
+        
+        n_neighbors = min(hnsw.connectivity, len_W)
+        neighbors = Int[ctx.W.data[i].second for i = 1:n_neighbors]
         hnsw.graphs[level][ind] = neighbors
+        
         for n in neighbors
-            if !haskey(hnsw.graphs[level], n)
-                hnsw.graphs[level][n] = Int[ind]
-            else
-                if ind ∉ hnsw.graphs[level][n]
-                    push!(hnsw.graphs[level][n], ind)
-                    if length(hnsw.graphs[level][n]) > mx
-                        hnsw.graphs[level][n] = sort!(
-                            hnsw.graphs[level][n],
-                            by = x -> hamming_distance(hnsw.data[x], hnsw.data[n]),
-                        )[1:mx]
-                    end
+            n_neighbors_list = hnsw.graphs[level][n]
+            if ind ∉ n_neighbors_list
+                push!(n_neighbors_list, ind)
+                if length(n_neighbors_list) > mx
+                    sort!(n_neighbors_list, by = x -> hamming_distance(hnsw.data[x], hnsw.data[n]))
+                    resize!(n_neighbors_list, mx)
                 end
             end
         end
 
         ep = neighbors[1]
 
-        reset!(candidates)
-        reset!(W)
+        reset!(ctx.candidates)
+        reset!(ctx.W)
+        ctx.epoch += 1
     end
 
     if new_entry_point
@@ -156,14 +212,14 @@ function construct(
     maximum_candidates::Int = 1000,
 )::HNSW
     hnsw = HNSW(connectivity; connectivity0 = connectivity * 2)
-    candidates = MinHeap(maximum_candidates)
-    W = MaxHeap(expansion_factor)
+    ctx = SearchContext(hnsw, expansion_factor, maximum_candidates)
     for _ = 1:n
         q = SVector{8,UInt64}(reinterpret(UInt64, rand(Int8, 64)))
-        insert!(hnsw, candidates, W, q)
+        insert!(hnsw, ctx, q)
     end
     for lc = 1:length(hnsw.graphs)
-        println("Layer $lc: length = $(length(hnsw.graphs[lc]))")
+        cnt = count(i -> i == hnsw.enter_point || !isempty(hnsw.graphs[lc][i]), 1:length(hnsw.data))
+        println("Layer $lc: length = $cnt")
     end
     return hnsw
 end
@@ -175,23 +231,54 @@ function search(
     expansion_search::Int = 30,
     maximum_candidates = 1000,
 )::Vector{Int}
-    candidates = MinHeap(maximum_candidates)
-    if k > expansion_search
-        expansion_search = k
+    ctx = SearchContext(hnsw, expansion_search, maximum_candidates)
+    result = Vector{Int}(undef, k)
+    n = search!(result, hnsw, query, ctx)
+    return result[1:n]
+end
+
+# In-place search for 100% allocation-free queries using SearchContext
+function search!(
+    result::Vector{Int},
+    hnsw::HNSW,
+    query::SVector{8,UInt64},
+    ctx::SearchContext;
+    k::Int = length(result)
+)
+    reset!(ctx.candidates)
+    reset!(ctx.W)
+
+    if ctx.epoch == typemax(Int)
+        fill!(ctx.visited, 0)
+        ctx.epoch = 1
+    else
+        ctx.epoch += 1
     end
-    W = MaxHeap(1)
+
+    # Ensure visited buffer is large enough
+    n_nodes = length(hnsw.data)
+    if length(ctx.visited) < n_nodes
+        resize!(ctx.visited, max(n_nodes, length(ctx.visited) * 2))
+        fill!(ctx.visited, 0)
+        ctx.epoch = 1
+    end
 
     L = length(hnsw.graphs)
     ep = hnsw.enter_point
     for level = L:-1:2
-        ep = _search_layer(hnsw, candidates, W, query, ep, level)[1]
-        reset!(candidates)
-        reset!(W)
+        ep = _greedy_search(hnsw, query, ep, level)
     end
-    W = MaxHeap(expansion_search)
-    result = _search_layer(hnsw, candidates, W, query, ep, 1)
-    n = min(k, length(W))
-    return result[1:n]
+    
+    _search_layer!(hnsw, ctx, query, ep, 1)
+    
+    len_W = length(ctx.W)
+    insertion_sort!(ctx.W.data, len_W)
+    
+    n = min(k, len_W, length(result))
+    for i = 1:n
+        @inbounds result[i] = ctx.W.data[i].second
+    end
+    return n
 end
 
 function approx_vs_exact(
